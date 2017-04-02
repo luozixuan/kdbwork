@@ -1,0 +1,42 @@
+.timer.job: flip `name`func`time!"s*p"$\:();
+.timer.job ,:(`;();0Wp);
+
+merge:`time xdesc upsert;  /merge只对time进行操作 更新下一次要执行func的时间
+add:{[t;n;f;tm]
+    r:(n;f;gtime tm);
+    t:merge[t;$[0h>type tm;r;reverse flip r]];
+    t
+};
+
+
+loop:{[t;tm]
+    while[tm>=last tms:t`time;t:run[t;-1+count tms;tm];t]
+
+};
+
+/运行timer.func中的方程，在这里，是value `until，从而继续调用until方程
+run:{[t;i;tm]
+    j:t i;
+    t:.[t;();_;i];
+    r:value (f:j`func),ltime tm;
+    if[not null r;merge[t;(j`name;f;tm+r)]];  /r就是返回的那个0D00:00:01  将新的time去merge 用在下次判断上
+    t
+};
+
+until1:{[d;et;f;delt;tm]
+    /if[tm<et;@[value;f,tm - delt;0N!];:d] 
+    if[tm<et;.[value f;(.z.P - delt;d);0N!];:d] /如果还没到
+};
+
+
+f_feed:{[timepoint;freq]
+  f_sel[;timepoint;freq]each tabs
+ };
+
+f_sel:{[tab;tp;fq]
+    startTime:`time$tp;
+    endTime:`time$(startTime + fq);
+    command::raze "select from ", string tab, " where (`time$time) > ", startTime, ", (`time$time) < ( ", endTime, ")";
+    re::value command;
+    h(".u.upd";tab;re)
+};
