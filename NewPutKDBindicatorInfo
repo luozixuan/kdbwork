@@ -1,0 +1,271 @@
+package Yan.processors.kdbversion;
+
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import java.io.IOException;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map.Entry;
+import java.util.Set;
+
+import org.apache.nifi.annotation.behavior.EventDriven;
+import org.apache.nifi.annotation.behavior.InputRequirement;
+import org.apache.nifi.annotation.behavior.InputRequirement.Requirement;
+import org.apache.nifi.annotation.documentation.CapabilityDescription;
+import org.apache.nifi.annotation.documentation.Tags;
+import org.apache.nifi.annotation.lifecycle.OnScheduled;
+import org.apache.nifi.annotation.lifecycle.OnShutdown;
+import org.apache.nifi.annotation.lifecycle.OnUnscheduled;
+import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.flowfile.FlowFile;
+import org.apache.nifi.logging.ComponentLog;
+import org.apache.nifi.processor.ProcessContext;
+import org.apache.nifi.processor.ProcessSession;
+import org.apache.nifi.processor.ProcessorInitializationContext;
+import org.apache.nifi.processor.Relationship;
+import org.apache.nifi.processor.exception.ProcessException;
+
+import com.exxeleron.qjava.QBasicConnection;
+import com.exxeleron.qjava.QDateTime;
+import com.exxeleron.qjava.QException;
+import com.exxeleron.qjava.QTable;
+import com.exxeleron.qjava.QTable.Row;
+import com.exxeleron.qjava.QType;
+
+@EventDriven
+@Tags({"kdb","insert"})
+@InputRequirement(Requirement.INPUT_REQUIRED)
+@CapabilityDescription("Writes the contents of a FlowFile to KDB")
+
+public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
+
+
+
+    static final Relationship REL_SUCCESS = new Relationship.Builder().name("success")
+            .description("All FlowFiles that are written to KDB are routed to this relationship").build();
+    static final Relationship REL_FAILURE = new Relationship.Builder().name("failure")
+            .description("All FlowFiles that cannot be written to KDB are routed to this relationship").build();
+    static final Relationship REL_RETRY = new Relationship.Builder().name("retry")
+            .description("All FlowFiles that cannot be written to KDB due to IOException are routed to this relationship").build();
+    /** insert function to ticker plant */
+    private static final String Q_UPD = ".u.upd";
+    public static final DateTimeFormatter DATETIME_FORMATTER_JSON = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm");
+    public static final DateTimeFormatter DATETIME_FORMAT_KDB = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS");
+    public static final ZoneId DEFAULT_ZONEID = ZoneId.systemDefault();
+    public static final char[] EMPTY_CHAR_ARRAY = new char[0];
+    
+    private List<PropertyDescriptor> propertyDescriptors;
+    private Set<Relationship> relationships;
+
+
+    
+    @Override
+    public void init(final ProcessorInitializationContext context){
+        List<PropertyDescriptor> _propertyDescriptors = new ArrayList<>();        
+        _propertyDescriptors.add(HOST);
+        _propertyDescriptors.add(PORT);
+        _propertyDescriptors.add(USER_NAME);
+        _propertyDescriptors.add(PASSWORD);
+        _propertyDescriptors.add(CHARSET);
+        _propertyDescriptors.add(TABLE_NAME);
+        propertyDescriptors = Collections.unmodifiableList(_propertyDescriptors);
+
+        final Set<Relationship> _relationships = new HashSet<>();
+        _relationships.add(REL_SUCCESS);
+        _relationships.add(REL_FAILURE);
+        _relationships.add(REL_RETRY);
+        relationships = Collections.unmodifiableSet(_relationships);
+    }
+
+    private final LinkedHashMap<String,String> metaMAP = new LinkedHashMap<>();
+    
+    @Override
+    public Set<Relationship> getRelationships() {
+        return relationships;
+    }
+
+    @Override
+    public final List<PropertyDescriptor> getSupportedPropertyDescriptors() {
+        return propertyDescriptors;
+    }
+
+    
+
+
+
+/*    public void onScheduled(final ProcessContext context) {
+        getLogger().info("************DEBUG THE OnScheduledMethod");
+        if(kdbSession.get() == null){
+            getLogger().info("try to establish a Q session");
+            openConnection(context);
+        }else{
+            try {
+                kdbSession.get().reset();
+            } catch (IOException | QException e) {
+                getLogger().info("Error in checking the session or reset session " , e);
+                e.printStackTrace();
+            }
+        }   
+    }*/
+    @OnScheduled
+    public void onScheduled(final ProcessContext context) {
+        getLogger().info("************DEBUG THE OnScheduledMethod");
+        //openConnection(context);  
+        //init(context);
+    }
+    
+    
+    
+    
+    @Override
+    public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {        
+        
+        FlowFile flowFile = session.get();
+        final ComponentLog logger = getLogger();
+        
+        init(context);
+        //QBasicConnection qConnection = kdbSession.get();
+        QBasicConnection qConnection = getConnection();
+        //getLogger().info("*****This is the Qconnection :" + qConnection.toString());
+        if ( flowFile == null ) {
+            return;
+        }        
+        if(metaInfo == null){
+            getLogger().info("try get the meta info");
+            metaInfo = queryForMeta(context);
+            QTable table = metaInfo.getKeys();            
+            for (Row row : table) {
+                String tar = (String)(row.toArray())[0];
+                metaMAP.put(tar, (flowFile.getAttribute(tar+"_type")));              
+            }
+            //TODO this should be removed.
+            metaMAP.remove("time");            
+        }
+        
+
+        Object[] inputObject = new Object[metaMAP.size()];        
+        try {
+            int index = 0;
+            getLogger().info("Prepared to convert data to KDBTypes");
+            for(Entry<String, String> entry : metaMAP.entrySet()){
+                inputObject[index] = convert(flowFile.getAttribute(entry.getKey()),entry.getValue());
+                index ++;
+             }
+        } catch (QException e1) {
+            e1.printStackTrace();
+            logger.error("Could not convert the data to Qtypes");
+            session.transfer(flowFile, REL_FAILURE);
+            return;
+        }catch (Exception e2) {
+            e2.printStackTrace();
+            logger.error("Could not convert the data due to the exception e" + e2);
+            session.transfer(flowFile, REL_FAILURE);
+            return;
+        }
+
+        try {
+            qConnection.sync(Q_UPD, "IndicatorInformation",inputObject);      
+            session.getProvenanceReporter().send(flowFile, context.getProperty(PORT).getValue());
+            session.transfer(flowFile, REL_SUCCESS); 
+        } catch (QException e) {
+            logger.error("QException occured, need to check the transferred data " , e);
+            session.transfer(flowFile, REL_FAILURE);
+        }catch (IOException e) {
+            logger.error("IOException, reset connection " , e);
+            session.transfer(flowFile, REL_RETRY);
+            try {
+                qConnection.reset();
+            } catch (IOException | QException e1) {
+                logger.error("Error in checking the session or reset session " , e);
+            }
+        }
+        try {
+            connectionPool.put(qConnection);
+        } catch (InterruptedException e) {
+            logger.error("Error in putting back the connection to queue " , e);
+            e.printStackTrace();
+        }
+        
+    }
+    
+    @OnUnscheduled
+    public void stop() {
+        super.stop();
+    }
+    
+    @OnShutdown
+    public void shutdown() {
+        super.stop();
+    }
+
+    public Object convert(String source, String targetType) throws QException{        
+        switch(targetType){
+            case "symbol" : 
+                return kdbValue(source);
+            case "string":
+                return kdbValueCharList(source);
+            case "jsontime":
+                return parseJSONDateTimeUTC(source,DATETIME_FORMATTER_JSON);
+            case "kdbtime":
+                return parseJSONDateTimeUTC(source,DATETIME_FORMAT_KDB);
+        };
+        return null;
+       
+        
+    }
+    public String kdbValue(String stringValue) throws QException {
+        if (stringValue == null) {
+                return (String) QType.getQNull(QType.SYMBOL);
+        }
+        return stringValue;
+    }
+    public char[] kdbValueCharList(String stringValue) {
+        if (stringValue == null) {
+            return EMPTY_CHAR_ARRAY;
+        }
+        return stringValue.toCharArray();
+    }
+    
+    public  QDateTime parseJSONDateTimeUTC(String time,DateTimeFormatter fommatter) throws QException {
+        LocalDateTime timeJ = LocalDateTime.parse(time, fommatter);
+        
+        if (timeJ == null) {
+                return (QDateTime) QType.getQNull(QType.DATETIME);
+        }
+        return new QDateTime(toDate(timeJ));
+        
+    }
+    public  Date toDate(LocalDateTime dateTime) {
+        if (dateTime == null) {
+            return null;
+        }
+        ZonedDateTime zonedDateTime = dateTime.atZone(DEFAULT_ZONEID);
+        return Date.from(zonedDateTime.toInstant());
+    }
+
+    
+}
+
