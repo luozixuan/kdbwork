@@ -1,0 +1,296 @@
+package Yan.processors.kdbversion;
+
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicReference;
+
+import org.apache.nifi.processor.AbstractProcessor;
+import org.apache.nifi.processor.ProcessContext;
+import org.apache.nifi.processor.util.StandardValidators;
+
+import com.exxeleron.qjava.QBasicConnection;
+import com.exxeleron.qjava.QConnection;
+import com.exxeleron.qjava.QException;
+import com.exxeleron.qjava.QKeyedTable;
+//import ny2.ats.database.kdb.KdbConnectionUtility;
+import org.apache.nifi.components.PropertyDescriptor;
+
+public abstract class AbstractKDBProcessor extends AbstractProcessor {
+    public static final PropertyDescriptor HOST = new PropertyDescriptor.Builder()
+        .name("KDB server")
+        .description("KDB Server address")
+        .required(true)
+        .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+        .build();
+    public static final PropertyDescriptor PORT = new PropertyDescriptor.Builder()
+        .name("KDB process port")
+        .description("The port of the kdb to use")
+        .required(true)
+        .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+        .build();
+    
+    public static final PropertyDescriptor TABLE_NAME = new PropertyDescriptor.Builder()
+        .name("table name")
+        .description("The table's name to input data")
+        .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+        .required(true)
+        .build();
+    
+    public static final PropertyDescriptor USER_NAME = new PropertyDescriptor.Builder()
+        .name("KDB user Name")
+        .description("The user name used to access")
+        .required(false)
+        .build();
+    public static final PropertyDescriptor PASSWORD = new PropertyDescriptor.Builder()
+        .name("KDB process password")
+        .description("The password used to access")
+        .required(false)
+        .build();
+    
+
+    
+    public static final PropertyDescriptor CHARSET = new PropertyDescriptor.Builder()
+        .name("Character Set")
+        .description("Specifies the character set of the record data.")
+        .required(true)
+        .expressionLanguageSupported(true)
+        .defaultValue("UTF-8")
+        .addValidator(StandardValidators.CHARACTER_SET_VALIDATOR)
+        .build();
+    static List<PropertyDescriptor> descriptors = new ArrayList<>();
+    
+    
+    
+    protected final AtomicReference<QBasicConnection> kdbSession = new AtomicReference<>(null);
+    
+    protected QBasicConnection kdbConnection;
+    protected QKeyedTable metaInfo;
+    
+    // Q connection
+    private static final int CONNECTION_POOL_SIZE = 5;
+    protected BlockingQueue<QBasicConnection> connectionPool = new LinkedBlockingQueue<>(CONNECTION_POOL_SIZE);
+    
+    static {
+        descriptors.add(HOST);
+        descriptors.add(PORT);
+        descriptors.add(USER_NAME);
+        descriptors.add(PASSWORD);
+        descriptors.add(CHARSET);
+        descriptors.add(TABLE_NAME);
+
+    }
+
+    
+/*    private final static List<PropertyDescriptor> descriptors;
+    //private final static List<PropertyDescriptor> descriptors;
+    
+    static {
+        List<PropertyDescriptor> _propertyDescriptors = new ArrayList<>();
+        _propertyDescriptors.add(HOST);
+        _propertyDescriptors.add(PORT);
+        _propertyDescriptors.add(USER_NAME);
+        _propertyDescriptors.add(PASSWORD);
+        _propertyDescriptors.add(CHARSET);
+        descriptors = Collections.unmodifiableList(_propertyDescriptors);
+
+    }*/
+/*    static {
+        descriptors.add(HOST);
+        descriptors.add(PORT);
+        descriptors.add(USER_NAME);
+        descriptors.add(PASSWORD);
+        descriptors.add(CHARSET);
+    }*/
+
+
+    
+/*    @OnScheduled
+    public void onScheduled(final ProcessContext context) {
+        if(QConnection == null){
+            getLogger().info("try to establish a Q session");
+            QConnection = openConnection(context);
+        }else{
+            if(!QConnection.isConnected()){
+                try {
+                    getLogger().info("try to re-establish the session");
+                    QConnection.reset();
+                } catch (IOException e) {
+                    getLogger().error("Cannnot re-establish connection due to IO excetpion", e);
+                    e.printStackTrace();
+                } catch (QException e) {
+                    getLogger().error("Cannnot re-establish connection due to Q excetpion,please check the q process", e);
+                    e.printStackTrace();
+                }
+            };
+        }     
+    }*/
+
+/*    @OnScheduled
+    public final void createConnection(ProcessContext context) {
+        if(QConnection == null){
+            getLogger().info("try to establish a Q session");
+            QConnection = openConnection(context);
+        }else{
+            try {
+                QConnection.close();
+            } catch (IOException e1) {
+                getLogger().error("Error in closing connection.", e1); 
+            }
+            try {
+                QConnection.open();
+            } catch (QException | IOException e ) {
+                getLogger().error("Error in RE-OPEN KDB connection.", e); 
+            }
+        }
+    }*/
+    
+    public final void closeConnection(QConnection connection) {
+        if (connection == null) {
+            return;
+        }
+        try {
+            if (connection.isConnected()) {
+                connection.close();
+            }
+        } catch (IOException e) {
+            getLogger().error("Error in closing connection.", e);
+        }
+    }
+    
+    public void init(ProcessContext context) {
+        if(connectionPool.isEmpty()){
+            for (int i = 0; i < CONNECTION_POOL_SIZE; i++) {
+                connectionPool.add(openConnectionTemp(context));
+            }
+        }
+
+    }
+    
+
+    
+    protected void openConnection(ProcessContext context) {
+        final String host = context.getProperty(HOST).getValue();
+        final int port = Integer.parseInt(context.getProperty(PORT).getValue());
+        final String username = context.getProperty(USER_NAME).getValue();
+        final String password = context.getProperty(PASSWORD).getValue();
+        QBasicConnection connection = null;    
+        try {
+            connection = new QBasicConnection(host, port, username, password);
+            connection.open();
+        } catch (QException | IOException e) {
+            //getLogger().error("Failed to schedule {} due to {}", new Object[] { this.getClass().getName(), e }, e);
+            getLogger().error("Cannnot create connection. host=" + host + ", port=" + port + ", username="+ username + ", password=" + password, e);
+        }
+        kdbSession.set(connection);   
+       
+    }
+    protected QBasicConnection getConnection() {
+        try {
+            QBasicConnection qConnection = connectionPool.take();
+
+            // check connection
+            while (!qConnection.isConnected()) {
+                try {
+                    qConnection.reset();
+                    Thread.sleep(20);
+                } catch (IOException | QException e) {
+                    getLogger().error("Failed to reset connection", e);
+                }
+            };
+            return qConnection;
+        } catch (InterruptedException e) {
+            getLogger().error("Failed to get Qconnection from pool", e);
+        }
+        return null;
+    }
+    protected QBasicConnection openConnectionTemp (ProcessContext context) {
+        final String host = context.getProperty(HOST).getValue();
+        final int port = Integer.parseInt(context.getProperty(PORT).getValue());
+        final String username = context.getProperty(USER_NAME).getValue();
+        final String password = context.getProperty(PASSWORD).getValue();
+        QBasicConnection connection = null;    
+        try {
+            connection = new QBasicConnection(host, port, username, password);
+            connection.open();
+        } catch (QException | IOException e) {
+            //getLogger().error("Failed to schedule {} due to {}", new Object[] { this.getClass().getName(), e }, e);
+            getLogger().error("Cannnot create connection. host=" + host + ", port=" + port + ", username="+ username + ", password=" + password, e);
+        }
+        return connection;
+        
+    }
+    
+    protected void openConnection(String host, int port, String username, String password) {
+        QBasicConnection connection = null;
+        try {
+            connection = new QBasicConnection(host, port, username, password);
+            connection.open();
+            getLogger().info("Q session opened");
+        } catch (QException | IOException e) {
+            getLogger().error("Failed to schedule {} due to {}", new Object[] { this.getClass().getName(), e }, e);
+            getLogger().error("Cannnot create connection. host=" + host + ", port=" + port + ", username="+ username + ", password=" + password, e);
+        }
+        kdbSession.set(connection);
+        
+    }
+    
+    
+    protected QKeyedTable queryForMeta(ProcessContext context) {
+        QBasicConnection connection = null;
+        //QKeyedTable metaResponse;
+        connection = openConnectionTemp(context);
+        String tabName = context.getProperty(TABLE_NAME).getValue();       
+        try {
+            Object response = connection.sync("meta", tabName);
+            return (QKeyedTable) response;
+        } catch (QException | IOException e) {
+            getLogger().error("Error in query meta table", e);
+            return null;
+        } finally {
+            closeConnection(connection);
+        }
+    }
+    
+    public void stop() {
+/*        if (kdbSession.get() != null) {
+            try {
+                kdbSession.get().close();
+            } catch (IOException e) {
+                getLogger().error("Error in closing connection.", e);
+            }
+            kdbSession.set(null);
+        }*/
+        if(!connectionPool.isEmpty()){
+            for(QBasicConnection qcon : connectionPool){
+                getLogger().info("Closing the Qconnections gracefully.");
+                closeConnection(qcon);
+            }
+        }
+
+    }
+    
+
+}
+
