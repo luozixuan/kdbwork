@@ -51,12 +51,7 @@ public abstract class AbstractKDBProcessor extends AbstractProcessor {
         .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
         .build();
     
-    public static final PropertyDescriptor TABLE_NAME = new PropertyDescriptor.Builder()
-        .name("table name")
-        .description("The table's name to input data")
-        .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
-        .required(true)
-        .build();
+
     
     public static final PropertyDescriptor USER_NAME = new PropertyDescriptor.Builder()
         .name("KDB user Name")
@@ -98,7 +93,6 @@ public abstract class AbstractKDBProcessor extends AbstractProcessor {
         descriptors.add(USER_NAME);
         descriptors.add(PASSWORD);
         descriptors.add(CHARSET);
-        descriptors.add(TABLE_NAME);
 
     }
 
@@ -257,21 +251,7 @@ public abstract class AbstractKDBProcessor extends AbstractProcessor {
     }
     
     
-    protected QKeyedTable queryForMeta(ProcessContext context) {
-        QBasicConnection connection = null;
-        //QKeyedTable metaResponse;
-        connection = openConnectionTemp(context);
-        String tabName = context.getProperty(TABLE_NAME).getValue();       
-        try {
-            Object response = connection.sync("meta", tabName);
-            return (QKeyedTable) response;
-        } catch (QException | IOException e) {
-            getLogger().error("Error in query meta table", e);
-            return null;
-        } finally {
-            closeConnection(connection);
-        }
-    }
+
     
     public void stop() {
 /*        if (kdbSession.get() != null) {
