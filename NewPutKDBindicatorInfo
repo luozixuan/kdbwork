@@ -44,13 +44,14 @@ import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.logging.ComponentLog;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
-import org.apache.nifi.processor.ProcessorInitializationContext;
 import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.processor.exception.ProcessException;
+import org.apache.nifi.processor.util.StandardValidators;
 
 import com.exxeleron.qjava.QBasicConnection;
 import com.exxeleron.qjava.QDateTime;
 import com.exxeleron.qjava.QException;
+import com.exxeleron.qjava.QKeyedTable;
 import com.exxeleron.qjava.QTable;
 import com.exxeleron.qjava.QTable.Row;
 import com.exxeleron.qjava.QType;
@@ -62,7 +63,12 @@ import com.exxeleron.qjava.QType;
 
 public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
 
-
+    public static final PropertyDescriptor TABLE_NAME = new PropertyDescriptor.Builder()
+    .name("table name")
+    .description("The table's name to input data")
+    .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+    .required(true)
+    .build();
 
     static final Relationship REL_SUCCESS = new Relationship.Builder().name("success")
             .description("All FlowFiles that are written to KDB are routed to this relationship").build();
@@ -77,28 +83,21 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
     public static final ZoneId DEFAULT_ZONEID = ZoneId.systemDefault();
     public static final char[] EMPTY_CHAR_ARRAY = new char[0];
     
-    private List<PropertyDescriptor> propertyDescriptors;
-    private Set<Relationship> relationships;
+    private final static List<PropertyDescriptor> propertyDescriptors;
+    private final static Set<Relationship> relationships;
 
-
-    
-    @Override
-    public void init(final ProcessorInitializationContext context){
-        List<PropertyDescriptor> _propertyDescriptors = new ArrayList<>();        
-        _propertyDescriptors.add(HOST);
-        _propertyDescriptors.add(PORT);
-        _propertyDescriptors.add(USER_NAME);
-        _propertyDescriptors.add(PASSWORD);
-        _propertyDescriptors.add(CHARSET);
+    static {
+        List<PropertyDescriptor> _propertyDescriptors = new ArrayList<>();
+        _propertyDescriptors.addAll(descriptors);
         _propertyDescriptors.add(TABLE_NAME);
         propertyDescriptors = Collections.unmodifiableList(_propertyDescriptors);
-
-        final Set<Relationship> _relationships = new HashSet<>();
+        Set<Relationship> _relationships = new HashSet<>();
         _relationships.add(REL_SUCCESS);
         _relationships.add(REL_FAILURE);
         _relationships.add(REL_RETRY);
         relationships = Collections.unmodifiableSet(_relationships);
     }
+
 
     private final LinkedHashMap<String,String> metaMAP = new LinkedHashMap<>();
     
@@ -114,22 +113,6 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
 
     
 
-
-
-/*    public void onScheduled(final ProcessContext context) {
-        getLogger().info("************DEBUG THE OnScheduledMethod");
-        if(kdbSession.get() == null){
-            getLogger().info("try to establish a Q session");
-            openConnection(context);
-        }else{
-            try {
-                kdbSession.get().reset();
-            } catch (IOException | QException e) {
-                getLogger().info("Error in checking the session or reset session " , e);
-                e.printStackTrace();
-            }
-        }   
-    }*/
     @OnScheduled
     public void onScheduled(final ProcessContext context) {
         getLogger().info("************DEBUG THE OnScheduledMethod");
@@ -144,15 +127,13 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
     public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {        
         
         FlowFile flowFile = session.get();
+        if ( flowFile == null ) {
+            return;
+        } 
         final ComponentLog logger = getLogger();
         
         init(context);
-        //QBasicConnection qConnection = kdbSession.get();
-        QBasicConnection qConnection = getConnection();
-        //getLogger().info("*****This is the Qconnection :" + qConnection.toString());
-        if ( flowFile == null ) {
-            return;
-        }        
+        QBasicConnection qConnection = getConnection();       
         if(metaInfo == null){
             getLogger().info("try get the meta info");
             metaInfo = queryForMeta(context);
@@ -169,7 +150,7 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
         Object[] inputObject = new Object[metaMAP.size()];        
         try {
             int index = 0;
-            getLogger().info("Prepared to convert data to KDBTypes");
+            logger.info("Prepared to convert data to KDBTypes");
             for(Entry<String, String> entry : metaMAP.entrySet()){
                 inputObject[index] = convert(flowFile.getAttribute(entry.getKey()),entry.getValue());
                 index ++;
@@ -221,21 +202,42 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
         super.stop();
     }
 
-    public Object convert(String source, String targetType) throws QException{        
+    public <T> Object convert(T source, String targetType) throws QException{        
         switch(targetType){
             case "symbol" : 
-                return kdbValue(source);
+                return kdbValue((String) source);
             case "string":
-                return kdbValueCharList(source);
+                return kdbValueCharList((String) source);
             case "jsontime":
-                return parseJSONDateTimeUTC(source,DATETIME_FORMATTER_JSON);
+                return parseJSONDateTimeUTC((String) source,DATETIME_FORMATTER_JSON);
             case "kdbtime":
-                return parseJSONDateTimeUTC(source,DATETIME_FORMAT_KDB);
+                return parseJSONDateTimeUTC((String) source,DATETIME_FORMAT_KDB);
+            case "float":
+                return kdbFloatValue((Float) source);
+            case "int":
+                return kdbIntValue((Integer)source);
         };
         return null;
        
         
     }
+    
+    protected QKeyedTable queryForMeta(ProcessContext context) {
+        QBasicConnection connection = null;
+        //QKeyedTable metaResponse;
+        connection = openConnectionTemp(context);
+        String tabName = context.getProperty(TABLE_NAME).getValue();       
+        try {
+            Object response = connection.sync("meta", tabName);
+            return (QKeyedTable) response;
+        } catch (QException | IOException e) {
+            getLogger().error("Error in query meta table", e);
+            return null;
+        } finally {
+            closeConnection(connection);
+        }
+    }
+    
     public String kdbValue(String stringValue) throws QException {
         if (stringValue == null) {
                 return (String) QType.getQNull(QType.SYMBOL);
@@ -265,7 +267,19 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
         ZonedDateTime zonedDateTime = dateTime.atZone(DEFAULT_ZONEID);
         return Date.from(zonedDateTime.toInstant());
     }
-
     
+    public static Float kdbFloatValue(Float floatValue) throws QException{
+        if (floatValue == null) {
+                return (float) QType.getQNull(QType.FLOAT);
+        }
+        return floatValue;
+    }
+    
+    public static Integer kdbIntValue(Integer integerValue) throws QException {
+        if (integerValue == null) {
+                return (Integer) QType.getQNull(QType.INT);
+        }
+        return integerValue;
+    }
 }
 
