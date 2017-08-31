@@ -80,6 +80,7 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
     private static final String Q_UPD = ".u.upd";
     public static final DateTimeFormatter DATETIME_FORMATTER_JSON = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm");
     public static final DateTimeFormatter DATETIME_FORMAT_KDB = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS");
+    public static final DateTimeFormatter DATETIME_FORMAT_ALPACA = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
     public static final ZoneId DEFAULT_ZONEID = ZoneId.systemDefault();
     public static final char[] EMPTY_CHAR_ARRAY = new char[0];
     
@@ -152,6 +153,8 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
             int index = 0;
             logger.info("Prepared to convert data to KDBTypes");
             for(Entry<String, String> entry : metaMAP.entrySet()){
+/*                logger.info("Entry Key is : " + flowFile.getAttribute(entry.getKey()));
+                logger.info("Entry Value is : " + entry.getValue());*/
                 inputObject[index] = convert(flowFile.getAttribute(entry.getKey()),entry.getValue());
                 index ++;
              }
@@ -168,7 +171,12 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
         }
 
         try {
-            qConnection.sync(Q_UPD, "IndicatorInformation",inputObject);      
+            String tabname = context.getProperty(TABLE_NAME).getValue();    
+/*            logger.info("length of inpuObject is " + inputObject.length);
+            for(int i=0;i<inputObject.length;i++){
+                logger.info("The " + i + "'s object is"+ inputObject[i]);
+            }*/
+            qConnection.sync(Q_UPD, tabname,inputObject);      
             session.getProvenanceReporter().send(flowFile, context.getProperty(PORT).getValue());
             session.transfer(flowFile, REL_SUCCESS); 
         } catch (QException e) {
@@ -202,20 +210,22 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
         super.stop();
     }
 
-    public <T> Object convert(T source, String targetType) throws QException{        
+    public Object convert(String source, String targetType) throws QException{        
         switch(targetType){
             case "symbol" : 
-                return kdbValue((String) source);
+                return kdbValue(source);
             case "string":
-                return kdbValueCharList((String) source);
+                return kdbValueCharList(source);
             case "jsontime":
-                return parseJSONDateTimeUTC((String) source,DATETIME_FORMATTER_JSON);
+                return parseJSONDateTimeUTC(source,DATETIME_FORMATTER_JSON);
             case "kdbtime":
-                return parseJSONDateTimeUTC((String) source,DATETIME_FORMAT_KDB);
+                return parseJSONDateTimeUTC(source,DATETIME_FORMAT_KDB);
+            case "alpacatime":
+                return parseJSONDateTimeUTC(source,DATETIME_FORMAT_ALPACA);
             case "float":
-                return kdbFloatValue((Float) source);
+                return kdbFloatValue(Double.parseDouble(source));
             case "int":
-                return kdbIntValue((Integer)source);
+                return kdbIntValue(Integer.parseInt(source));
         };
         return null;
        
@@ -268,9 +278,9 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
         return Date.from(zonedDateTime.toInstant());
     }
     
-    public static Float kdbFloatValue(Float floatValue) throws QException{
+    public static Double kdbFloatValue(Double floatValue) throws QException{
         if (floatValue == null) {
-                return (float) QType.getQNull(QType.FLOAT);
+                return (Double) QType.getQNull(QType.DOUBLE);
         }
         return floatValue;
     }
