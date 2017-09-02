@@ -18,6 +18,11 @@ package Yan.processors.kdbversion;
  */
 
 import java.io.IOException;
+import java.text.DateFormat;
+import java.text.DecimalFormat;
+import java.text.NumberFormat;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
@@ -28,6 +33,7 @@ import java.util.Date;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.TimeZone;
 import java.util.Map.Entry;
 import java.util.Set;
 
@@ -54,6 +60,7 @@ import com.exxeleron.qjava.QException;
 import com.exxeleron.qjava.QKeyedTable;
 import com.exxeleron.qjava.QTable;
 import com.exxeleron.qjava.QTable.Row;
+import com.exxeleron.qjava.QTimestamp;
 import com.exxeleron.qjava.QType;
 
 @EventDriven
@@ -78,11 +85,18 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
             .description("All FlowFiles that cannot be written to KDB due to IOException are routed to this relationship").build();
     /** insert function to ticker plant */
     private static final String Q_UPD = ".u.upd";
-    public static final DateTimeFormatter DATETIME_FORMATTER_JSON = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm");
-    public static final DateTimeFormatter DATETIME_FORMAT_KDB = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS");
-    public static final DateTimeFormatter DATETIME_FORMAT_ALPACA = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
-    public static final ZoneId DEFAULT_ZONEID = ZoneId.systemDefault();
-    public static final char[] EMPTY_CHAR_ARRAY = new char[0];
+    private static final DateTimeFormatter DATETIME_FORMATTER_JSON = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm");
+    private static final DateTimeFormatter DATETIME_FORMAT_KDB = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS");
+    private static final DateTimeFormatter DATETIME_FORMAT_ALPACA = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
+    private static final DateTimeFormatter TIMESTAMP_FORMAT_FROM = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSSSSS");
+    private static final DateTimeFormatter TIMESTAMP_FORMAT_TO = DateTimeFormatter.ofPattern("yyyy.MM.dd'D'HH:mm:ss.SSSSSSSSS");
+    private static final DateFormat dateFormat = new SimpleDateFormat("yyyy.MM.dd'D'HH:mm:ss.SSS");
+    private static final NumberFormat nanosFormatter = new DecimalFormat("000000");
+    private static final String LIST_DELIMITER = ",";
+    private static final char[] EMPTY_CHAR_ARRAY = new char[0];
+    private static final TimeZone TIME_ZONE = TimeZone.getDefault();
+    private static final long DAY_MILLIS = 86400000L;
+    private static final long QEPOCH_MILLIS = 10957 * DAY_MILLIS;
     
     private final static List<PropertyDescriptor> propertyDescriptors;
     private final static Set<Relationship> relationships;
@@ -148,15 +162,44 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
         }
         
 
-        Object[] inputObject = new Object[metaMAP.size()];        
+        Object[] inputObject = new Object[metaMAP.size()]; 
+        //HashMap<String,ArrayList<Double>> doubleMap = new HashMap<>();
         try {
-            int index = 0;
+/*            int index = 0;
             logger.info("Prepared to convert data to KDBTypes");
+            for(Entry<String, String> entry : metaMAP.entrySet()){
+                if(entry.getValue().equals("float_list")){
+                    String firstName = entry.getKey().split("_")[0];
+                    if(!doubleMap.keySet().contains(entry.getKey())){
+                        doubleMap.put(firstName, new ArrayList<Double>());                        
+                    }
+                    Double e = (Double) convert(flowFile.getAttribute(entry.getKey()),"float");
+                    doubleMap.get(firstName).add(e);
+                }
+                
+            }*/
+            
+            int index = 0;
             for(Entry<String, String> entry : metaMAP.entrySet()){
 /*                logger.info("Entry Key is : " + flowFile.getAttribute(entry.getKey()));
                 logger.info("Entry Value is : " + entry.getValue());*/
-                inputObject[index] = convert(flowFile.getAttribute(entry.getKey()),entry.getValue());
-                index ++;
+/*                if(entry.getValue().equals("float_list")){
+                    String firstName = entry.getKey().split("_")[0];
+                    int cnt = doubleMap.get(firstName).size();
+                    logger.info("Cnt list is : " + cnt);
+                    Double[] tarDouList = new Double[cnt];
+                    for(int i = 0;i < doubleMap.get(firstName).size();i ++){
+                        logger.info("Put the double : " + doubleMap.get(firstName).get(i));
+                        tarDouList[i] = doubleMap.get(firstName).get(i);
+                     }
+                    inputObject[index] = tarDouList;
+                    index = index + cnt;
+                }else{*/
+                    inputObject[index] = convert(flowFile.getAttribute(entry.getKey()),entry.getValue());
+                    index ++;
+/*                }*/
+                
+
              }
         } catch (QException e1) {
             e1.printStackTrace();
@@ -176,6 +219,7 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
             for(int i=0;i<inputObject.length;i++){
                 logger.info("The " + i + "'s object is"+ inputObject[i]);
             }*/
+
             qConnection.sync(Q_UPD, tabname,inputObject);      
             session.getProvenanceReporter().send(flowFile, context.getProperty(PORT).getValue());
             session.transfer(flowFile, REL_SUCCESS); 
@@ -210,7 +254,7 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
         super.stop();
     }
 
-    public Object convert(String source, String targetType) throws QException{        
+    public Object convert(String source, String targetType) throws QException, ParseException{        
         switch(targetType){
             case "symbol" : 
                 return kdbValue(source);
@@ -222,10 +266,15 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
                 return parseJSONDateTimeUTC(source,DATETIME_FORMAT_KDB);
             case "alpacatime":
                 return parseJSONDateTimeUTC(source,DATETIME_FORMAT_ALPACA);
+            case "timestamp":
+                return kdbValueTimestamp(source,TIMESTAMP_FORMAT_FROM,TIMESTAMP_FORMAT_TO);
             case "float":
                 return kdbFloatValue(Double.parseDouble(source));
             case "int":
                 return kdbIntValue(Integer.parseInt(source));
+            case "floatlist":
+                return kdbFloatList(source);
+
         };
         return null;
        
@@ -248,20 +297,57 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
         }
     }
     
-    public String kdbValue(String stringValue) throws QException {
+    public  Double[] kdbFloatList(String stringValue) throws QException {
+        if (stringValue == null) {
+                return  (Double[]) QType.getQNull(QType.DOUBLE_LIST);
+        }else{
+            String[] source = stringValue.split(LIST_DELIMITER);
+            Double[] output = new Double[source.length];
+            for(int i = 0; i < source.length; i++){
+                output[i] = Double.parseDouble(source[i]);
+            }
+            return output;
+        }
+
+    }
+    
+
+    
+    public static String kdbValue(String stringValue) throws QException {
         if (stringValue == null) {
                 return (String) QType.getQNull(QType.SYMBOL);
         }
         return stringValue;
     }
-    public char[] kdbValueCharList(String stringValue) {
+    public static char[] kdbValueCharList(String stringValue) {
         if (stringValue == null) {
             return EMPTY_CHAR_ARRAY;
         }
         return stringValue.toCharArray();
     }
     
-    public  QDateTime parseJSONDateTimeUTC(String time,DateTimeFormatter fommatter) throws QException {
+    
+    
+    /**
+     * Convert from Java:LocalDateTime to kdb:timestamp.
+     * @param dateTime
+     * @return
+     * @throws ParseException QException
+     */
+    public QTimestamp kdbValueTimestamp(String timestamp,DateTimeFormatter fommatterFrom,DateTimeFormatter fommaterTo) throws QException, ParseException{
+        if (timestamp == null) {
+                return (QTimestamp) QType.getQNull(QType.TIMESTAMP);
+        }
+        getLogger().info("Original timestamp is" + timestamp);
+        LocalDateTime timeJ = LocalDateTime.parse(timestamp, fommatterFrom);
+        getLogger().info("Timestamp before converted " + timeJ);
+        String targetTime = timeJ.format(fommaterTo);
+        getLogger().info("Timestamp is converted to" + timeJ.format(fommaterTo));
+        return new QTimestamp(getNanos(getDateformat().parse(targetTime.substring(0, targetTime.lastIndexOf(".") + 4)))
+                + getNanosformat().parse(targetTime.substring(targetTime.lastIndexOf(".") + 4)).longValue());
+    }
+    
+    public static QDateTime parseJSONDateTimeUTC(String time,DateTimeFormatter fommatter) throws QException {
         LocalDateTime timeJ = LocalDateTime.parse(time, fommatter);
         
         if (timeJ == null) {
@@ -270,11 +356,11 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
         return new QDateTime(toDate(timeJ));
         
     }
-    public  Date toDate(LocalDateTime dateTime) {
+    public static Date toDate(LocalDateTime dateTime) {
         if (dateTime == null) {
             return null;
         }
-        ZonedDateTime zonedDateTime = dateTime.atZone(DEFAULT_ZONEID);
+        ZonedDateTime zonedDateTime = dateTime.atZone(TIME_ZONE.toZoneId());
         return Date.from(zonedDateTime.toInstant());
     }
     
@@ -291,5 +377,22 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
         }
         return integerValue;
     }
+    
+    private static long getNanos( final Date datetime ) {
+        return 1000000 * (tzOffsetFromQ(datetime.getTime()) - QEPOCH_MILLIS);
+    }
+
+    static long tzOffsetFromQ( final long dt ) {
+        return dt + TIME_ZONE.getOffset(dt);
+    }
+    
+    private static DateFormat getDateformat() {
+        return (DateFormat) dateFormat.clone();
+    }
+    private static NumberFormat getNanosformat() {
+        return (NumberFormat) nanosFormatter.clone();
+    }
+    
+    
 }
 
