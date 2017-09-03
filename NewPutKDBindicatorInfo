@@ -24,7 +24,6 @@ import java.text.NumberFormat;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.time.LocalDateTime;
-import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -33,9 +32,9 @@ import java.util.Date;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.TimeZone;
 import java.util.Map.Entry;
 import java.util.Set;
+import java.util.TimeZone;
 
 import org.apache.nifi.annotation.behavior.EventDriven;
 import org.apache.nifi.annotation.behavior.InputRequirement;
@@ -66,16 +65,37 @@ import com.exxeleron.qjava.QType;
 @EventDriven
 @Tags({"kdb","insert"})
 @InputRequirement(Requirement.INPUT_REQUIRED)
-@CapabilityDescription("Writes the contents of a FlowFile to KDB")
+@CapabilityDescription("Writes the contents of a FlowFile to KDB. "
+        + "Needs to get column type info from UpdateAttribute processor, "
+        + "Needs to confirgure put KDB via TP or directly to plain port "
+        + "This processor will query the target kdb-port:table and convert the content according to type info "
+        + "Is designed to push data per table "
+        + "When pushing data via Qbasic connection, the session exception will be picked and retry to connect. "
+        + "Any data failed on serilize needs to be routed on Fail-relation to a log attribute "
+        + "In the configuration, needs to define the target kdb port/user/pw/tp-mode or plain mode. ")
+
 
 public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
-
+    
+    public static final String INSERT_TICKER = ".u.upd";
+    public static final String INSERT_PLAIN = "insert";
+    
+    
+    public static final PropertyDescriptor INSERTER = new PropertyDescriptor.Builder()
+        .name("Inserter")
+        .description("Indicates whether the data be sent to a Tickerplant or plain kdb port; "
+            + "if using tickerplant, must ensure the tickerplant has the .u.upd function which is for publishing data to subscribers, ")
+            .required(true)
+            .allowableValues(INSERT_TICKER, INSERT_PLAIN)
+            .defaultValue(INSERT_TICKER)
+            .build();
+    
     public static final PropertyDescriptor TABLE_NAME = new PropertyDescriptor.Builder()
-    .name("table name")
-    .description("The table's name to input data")
-    .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
-    .required(true)
-    .build();
+        .name("table name")
+        .description("The table's name to input data. Must ensure the type is correctly defined")
+        .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+        .required(true)
+        .build();
 
     static final Relationship REL_SUCCESS = new Relationship.Builder().name("success")
             .description("All FlowFiles that are written to KDB are routed to this relationship").build();
@@ -85,6 +105,7 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
             .description("All FlowFiles that cannot be written to KDB due to IOException are routed to this relationship").build();
     /** insert function to ticker plant */
     private static final String Q_UPD = ".u.upd";
+    private static final String INSERT = "insert";
     private static final DateTimeFormatter DATETIME_FORMATTER_JSON = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm");
     private static final DateTimeFormatter DATETIME_FORMAT_KDB = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS");
     private static final DateTimeFormatter DATETIME_FORMAT_ALPACA = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
@@ -105,6 +126,7 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
         List<PropertyDescriptor> _propertyDescriptors = new ArrayList<>();
         _propertyDescriptors.addAll(descriptors);
         _propertyDescriptors.add(TABLE_NAME);
+        _propertyDescriptors.add(INSERTER);
         propertyDescriptors = Collections.unmodifiableList(_propertyDescriptors);
         Set<Relationship> _relationships = new HashSet<>();
         _relationships.add(REL_SUCCESS);
@@ -131,8 +153,7 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
     @OnScheduled
     public void onScheduled(final ProcessContext context) {
         getLogger().info("************DEBUG THE OnScheduledMethod");
-        //openConnection(context);  
-        //init(context);
+
     }
     
     
@@ -163,43 +184,12 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
         
 
         Object[] inputObject = new Object[metaMAP.size()]; 
-        //HashMap<String,ArrayList<Double>> doubleMap = new HashMap<>();
+
         try {
-/*            int index = 0;
-            logger.info("Prepared to convert data to KDBTypes");
-            for(Entry<String, String> entry : metaMAP.entrySet()){
-                if(entry.getValue().equals("float_list")){
-                    String firstName = entry.getKey().split("_")[0];
-                    if(!doubleMap.keySet().contains(entry.getKey())){
-                        doubleMap.put(firstName, new ArrayList<Double>());                        
-                    }
-                    Double e = (Double) convert(flowFile.getAttribute(entry.getKey()),"float");
-                    doubleMap.get(firstName).add(e);
-                }
-                
-            }*/
-            
             int index = 0;
             for(Entry<String, String> entry : metaMAP.entrySet()){
-/*                logger.info("Entry Key is : " + flowFile.getAttribute(entry.getKey()));
-                logger.info("Entry Value is : " + entry.getValue());*/
-/*                if(entry.getValue().equals("float_list")){
-                    String firstName = entry.getKey().split("_")[0];
-                    int cnt = doubleMap.get(firstName).size();
-                    logger.info("Cnt list is : " + cnt);
-                    Double[] tarDouList = new Double[cnt];
-                    for(int i = 0;i < doubleMap.get(firstName).size();i ++){
-                        logger.info("Put the double : " + doubleMap.get(firstName).get(i));
-                        tarDouList[i] = doubleMap.get(firstName).get(i);
-                     }
-                    inputObject[index] = tarDouList;
-                    index = index + cnt;
-                }else{*/
                     inputObject[index] = convert(flowFile.getAttribute(entry.getKey()),entry.getValue());
-                    index ++;
-/*                }*/
-                
-
+                    index ++;             
              }
         } catch (QException e1) {
             e1.printStackTrace();
@@ -214,19 +204,14 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
         }
 
         try {
-            String tabname = context.getProperty(TABLE_NAME).getValue();    
-/*            logger.info("length of inpuObject is " + inputObject.length);
-            for(int i=0;i<inputObject.length;i++){
-                logger.info("The " + i + "'s object is"+ inputObject[i]);
-            }*/
-
-            qConnection.sync(Q_UPD, tabname,inputObject);      
+            qConnection.sync(context.getProperty(INSERTER).getValue(), context.getProperty(TABLE_NAME).getValue(),inputObject);      
             session.getProvenanceReporter().send(flowFile, context.getProperty(PORT).getValue());
             session.transfer(flowFile, REL_SUCCESS); 
         } catch (QException e) {
             logger.error("QException occured, need to check the transferred data " , e);
             session.transfer(flowFile, REL_FAILURE);
         }catch (IOException e) {
+            //TODO should not retry at high frequency
             logger.error("IOException, reset connection " , e);
             session.transfer(flowFile, REL_RETRY);
             try {
@@ -272,9 +257,12 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
                 return kdbFloatValue(Double.parseDouble(source));
             case "int":
                 return kdbIntValue(Integer.parseInt(source));
+            case "long":
+                return kdbLongValue(Long.parseLong(source));
             case "floatlist":
                 return kdbFloatList(source);
-
+            case "symlist":
+                return kdbSymList(source);
         };
         return null;
        
@@ -311,7 +299,15 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
 
     }
     
-
+    public String[] kdbSymList(String stringValue) throws QException {
+        if (stringValue == null) {
+                return (String[]) QType.getQNull(QType.SYMBOL);
+        }
+        getLogger().info("Input symlist is " + stringValue);
+        String[] output = stringValue.split(LIST_DELIMITER);
+        getLogger().info("After-split symlist is " + output);
+        return output;
+    }
     
     public static String kdbValue(String stringValue) throws QException {
         if (stringValue == null) {
@@ -378,6 +374,18 @@ public class  NewPutKDBIndicatorInfo extends AbstractKDBProcessor {
         return integerValue;
     }
     
+    /**
+     * Convert from Java:Long list to kdb:long.<br>
+     * @param longValue
+     * @return
+     * @throws QException 
+     */
+    public static Long kdbLongValue(Long longValue) throws QException {
+        if (longValue == null) {
+                return (Long) QType.getQNull(QType.LONG);
+        }
+        return longValue;
+    }
     private static long getNanos( final Date datetime ) {
         return 1000000 * (tzOffsetFromQ(datetime.getTime()) - QEPOCH_MILLIS);
     }
