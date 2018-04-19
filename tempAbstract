@@ -1,0 +1,269 @@
+package Yan.processors.kdbversion;
+
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicReference;
+
+//import ny2.ats.database.kdb.KdbConnectionUtility;
+import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.processor.AbstractProcessor;
+import org.apache.nifi.processor.ProcessContext;
+import org.apache.nifi.processor.util.StandardValidators;
+
+import com.exxeleron.qjava.QBasicConnection;
+import com.exxeleron.qjava.QCallbackConnection;
+import com.exxeleron.qjava.QConnection;
+import com.exxeleron.qjava.QException;
+import com.exxeleron.qjava.QKeyedTable;
+
+public abstract class AbstractKDBProcessor extends AbstractProcessor {
+    public static final PropertyDescriptor HOST = new PropertyDescriptor.Builder()
+        .name("KDB server")
+        .description("KDB Server address")
+        .required(true)
+        .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+        .build();
+    public static final PropertyDescriptor PORT = new PropertyDescriptor.Builder()
+        .name("KDB process port")
+        .description("The port of the kdb to use")
+        .required(true)
+        .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+        .build();
+    
+
+    
+    public static final PropertyDescriptor USER_NAME = new PropertyDescriptor.Builder()
+        .name("KDB user Name")
+        .description("The user name used to access")
+        .required(false)
+        .build();
+    public static final PropertyDescriptor PASSWORD = new PropertyDescriptor.Builder()
+        .name("KDB process password")
+        .description("The password used to access")
+        .required(false)
+        .build();
+    
+
+    
+    public static final PropertyDescriptor CHARSET = new PropertyDescriptor.Builder()
+        .name("Character Set")
+        .description("Specifies the character set of the record data.")
+        .required(true)
+        .expressionLanguageSupported(true)
+        .defaultValue("UTF-8")
+        .addValidator(StandardValidators.CHARACTER_SET_VALIDATOR)
+        .build();
+    static List<PropertyDescriptor> descriptors = new ArrayList<>();
+    
+    
+    
+    protected final AtomicReference<QBasicConnection> kdbSession = new AtomicReference<>(null);
+    
+    protected QBasicConnection kdbConnection;
+    protected QKeyedTable metaInfo;
+    
+    // Q connection
+    private static final int CONNECTION_POOL_SIZE = 5;
+    protected BlockingQueue<QBasicConnection> connectionPool = new LinkedBlockingQueue<>(CONNECTION_POOL_SIZE);
+    protected BlockingQueue<QCallbackConnection> connectionPool_cb = new LinkedBlockingQueue<>(CONNECTION_POOL_SIZE);
+    protected String host;
+    protected int port;
+    protected String username;
+    protected String password;
+    
+    static {
+        descriptors.add(HOST);
+        descriptors.add(PORT);
+        descriptors.add(USER_NAME);
+        descriptors.add(PASSWORD);
+        descriptors.add(CHARSET);
+
+    }
+
+   
+    
+    public final void closeConnection(QConnection connection) {
+        if (connection == null) {
+            return;
+        }
+        try {
+            if (connection.isConnected()) {
+                connection.close();
+            }
+        } catch (IOException e) {
+            getLogger().error("Error in closing connection.", e);
+        }
+    }
+    
+    public void init(ProcessContext context) {
+        this.host = context.getProperty(HOST).getValue();
+        this.port = Integer.parseInt(context.getProperty(PORT).getValue());
+        this.username = context.getProperty(USER_NAME).getValue();
+        this.password = context.getProperty(PASSWORD).getValue();
+        if(connectionPool.isEmpty()){
+            for (int i = 0; i < CONNECTION_POOL_SIZE; i++) {
+                connectionPool.add(openConnectionTemp(host,port,username,password));
+
+            }
+        }
+        if(connectionPool_cb.isEmpty()){
+            for (int i = 0; i < CONNECTION_POOL_SIZE; i++) {
+                connectionPool_cb.add(openCallBackConnection(host,port,username,password));
+
+            }
+        }
+                   
+    }
+    
+
+    
+    protected void openConnection(ProcessContext context) {
+        final String host = context.getProperty(HOST).getValue();
+        final int port = Integer.parseInt(context.getProperty(PORT).getValue());
+        final String username = context.getProperty(USER_NAME).getValue();
+        final String password = context.getProperty(PASSWORD).getValue();
+        QBasicConnection connection = null;    
+        try {
+            connection = new QCallbackConnection(host, port, username, password);
+            connection.open();
+        } catch (QException | IOException e) {
+            //getLogger().error("Failed to schedule {} due to {}", new Object[] { this.getClass().getName(), e }, e);
+            getLogger().error("Cannnot create connection. host=" + host + ", port=" + port + ", username="+ username + ", password=" + password, e);
+        }
+        kdbSession.set(connection);   
+       
+    }
+    protected QBasicConnection getConnection() {
+        try {
+            QBasicConnection qConnection = connectionPool.take();
+
+            // check connection
+            while (!qConnection.isConnected()) {
+                try {
+                    qConnection.reset();
+                    Thread.sleep(20);
+                } catch (IOException | QException e) {
+                    getLogger().error("Failed to reset connection", e);
+                }
+            };
+            return qConnection;
+        } catch (InterruptedException e) {
+            getLogger().error("Failed to get Qconnection from pool", e);
+        }
+        return null;
+    }
+    
+    protected QCallbackConnection getCBConnection() {
+        try {
+            QCallbackConnection qConnection = connectionPool_cb.take();
+
+            // check connection
+            while (!qConnection.isConnected()) {
+                try {
+                    qConnection.reset();
+                    Thread.sleep(20);
+                } catch (IOException | QException e) {
+                    getLogger().error("Failed to reset connection", e);
+                }
+            };
+            return qConnection;
+        } catch (InterruptedException e) {
+            getLogger().error("Failed to get Qconnection from pool", e);
+        }
+        return null;
+    }
+    
+    
+    protected QBasicConnection openConnectionTemp (String host,int port,String username,String password ) {
+        QBasicConnection connection = null;    
+        try {
+            connection = new QBasicConnection(host, port, username, password);
+            connection.open();
+        } catch (QException | IOException e) {
+            //getLogger().error("Failed to schedule {} due to {}", new Object[] { this.getClass().getName(), e }, e);
+            getLogger().error("Cannnot create connection. host=" + host + ", port=" + port + ", username="+ username + ", password=" + password, e);
+        }
+        return connection;       
+    }
+    
+    
+    protected QCallbackConnection openCallBackConnection(String host,int port,String username,String password ) {
+        QCallbackConnection connection = null;    
+        try {
+            connection = new QCallbackConnection(host, port, username, password);
+            connection.open();
+        } catch (QException | IOException e) {
+            //getLogger().error("Failed to schedule {} due to {}", new Object[] { this.getClass().getName(), e }, e);
+            getLogger().error("Cannnot create callback connection. host=" + host + ", port=" + port + ", username="+ username + ", password=" + password, e);
+        }
+        return connection;       
+    }
+    
+    
+    protected void openConnection(String host, int port, String username, String password) {
+        QBasicConnection connection = null;
+        try {
+            connection = new QBasicConnection(host, port, username, password);
+            connection.open();
+            getLogger().info("Q session opened");
+        } catch (QException | IOException e) {
+            getLogger().error("Failed to schedule {} due to {}", new Object[] { this.getClass().getName(), e }, e);
+            getLogger().error("Cannnot create connection. host=" + host + ", port=" + port + ", username="+ username + ", password=" + password, e);
+        }
+        kdbSession.set(connection);
+        
+    }
+    
+    
+
+    
+    public void stop() {
+/*        if (kdbSession.get() != null) {
+            try {
+                kdbSession.get().close();
+            } catch (IOException e) {
+                getLogger().error("Error in closing connection.", e);
+            }
+            kdbSession.set(null);
+        }*/
+        if(!connectionPool.isEmpty()){
+            for(QBasicConnection qcon : connectionPool){
+                getLogger().info("Closing the Qconnections gracefully.");
+                closeConnection(qcon);
+            }
+        }
+
+        if(!connectionPool_cb.isEmpty()){
+            for(QCallbackConnection qcon : connectionPool_cb){
+                getLogger().info("Closing the Qconnections gracefully.");
+                closeConnection(qcon);
+            }
+        }
+        
+        
+    }
+    
+
+}
