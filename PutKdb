@@ -1,0 +1,543 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package btmu.efx.processors.kdb;
+
+import java.io.IOException;
+import java.text.DateFormat;
+import java.text.DecimalFormat;
+import java.text.NumberFormat;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+import java.time.LocalDateTime;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map.Entry;
+import java.util.Set;
+import java.util.TimeZone;
+import java.util.UUID;
+
+import org.apache.nifi.annotation.behavior.EventDriven;
+import org.apache.nifi.annotation.behavior.InputRequirement;
+import org.apache.nifi.annotation.behavior.InputRequirement.Requirement;
+import org.apache.nifi.annotation.documentation.CapabilityDescription;
+import org.apache.nifi.annotation.documentation.Tags;
+import org.apache.nifi.annotation.lifecycle.OnScheduled;
+import org.apache.nifi.annotation.lifecycle.OnShutdown;
+import org.apache.nifi.annotation.lifecycle.OnUnscheduled;
+import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.flowfile.FlowFile;
+import org.apache.nifi.logging.ComponentLog;
+import org.apache.nifi.processor.ProcessContext;
+import org.apache.nifi.processor.ProcessSession;
+import org.apache.nifi.processor.Relationship;
+import org.apache.nifi.processor.exception.ProcessException;
+import org.apache.nifi.processor.util.StandardValidators;
+
+import com.exxeleron.qjava.QBasicConnection;
+import com.exxeleron.qjava.QDateTime;
+import com.exxeleron.qjava.QException;
+import com.exxeleron.qjava.QKeyedTable;
+import com.exxeleron.qjava.QTable;
+import com.exxeleron.qjava.QTable.Row;
+import com.exxeleron.qjava.QTimestamp;
+import com.exxeleron.qjava.QType;
+import com.exxeleron.qjava.QTime;
+
+
+@EventDriven
+@Tags({"kdb","insert"})
+@InputRequirement(Requirement.INPUT_REQUIRED)
+@CapabilityDescription("Writes the contents of a FlowFile to KDB. "
+        + "Needs to get column type info from UpdateAttribute processor, "
+        + "Needs to confirgure put KDB via TP or directly to plain port "
+        + "This processor will query the target kdb-port:table and convert the content according to type info "
+        + "Is designed to push data per table "
+        + "When pushing data via Qbasic connection, the session exception will be picked and retry to connect. "
+        + "Any data failed on serilize needs to be routed on Fail-relation to a log attribute "
+        + "In the configuration, needs to define the target kdb port/user/pw/tp-mode or plain mode. ")
+
+
+public class  PutKdb extends AbstractKDBProcessor {
+    
+    public static final String INSERT_TICKER = ".u.upd";
+    public static final String INSERT_PLAIN = "insert";
+    
+    
+    public static final PropertyDescriptor INSERTER = new PropertyDescriptor.Builder()
+        .name("Inserter")
+        .description("Indicates whether the data be sent to a Tickerplant or plain kdb port; "
+            + "if using tickerplant, must ensure the tickerplant has the .u.upd function which is for publishing data to subscribers, ")
+            .required(true)
+            .allowableValues(INSERT_TICKER, INSERT_PLAIN)
+            .defaultValue(INSERT_TICKER)
+            .build();
+    
+    public static final PropertyDescriptor TABLE_NAME = new PropertyDescriptor.Builder()
+        .name("table name")
+        .description("The table's name to input data. Must ensure the type is correctly defined")
+        .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+        .required(true)
+        .build();
+
+    public static final PropertyDescriptor SET_TIME_ONTICK = new PropertyDescriptor.Builder()
+            .name("set-time-on-tickerplant")
+            .displayName("Set time by TickerPlant")
+            .description("Specifies whether to set time by tickerplant or get time from outside "
+                    + "If false, need to set time column type at UpdateAttribute processor.")
+            .required(true)
+            .allowableValues("true", "false")
+            .defaultValue("true")
+            .addValidator(StandardValidators.BOOLEAN_VALIDATOR)
+            .build();
+
+    static final Relationship REL_SUCCESS = new Relationship.Builder().name("success")
+            .description("All FlowFiles that are written to KDB are routed to this relationship").build();
+    static final Relationship REL_FAILURE = new Relationship.Builder().name("failure")
+            .description("All FlowFiles that cannot be written to KDB are routed to this relationship").build();
+    static final Relationship REL_RETRY = new Relationship.Builder().name("retry")
+            .description("All FlowFiles that cannot be written to KDB due to IOException are routed to this relationship").build();
+    /** insert function to ticker plant */
+    private static final String Q_UPD = ".u.upd";
+    private static final String INSERT = "insert";
+    private static final DateTimeFormatter DATETIME_FORMATTER_JSON = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm");
+    private static final DateTimeFormatter DATETIME_FORMAT_KDB = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS");
+    private static final DateTimeFormatter DATETIME_FORMAT_ALPACA = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
+    private static final DateTimeFormatter TIMESTAMP_FORMAT_FROM = DateTimeFormatter.ofPattern("yyyy.MM.dd HH:mm:ss.SSSSSSSSS");
+    private static final DateTimeFormatter TIMESTAMP_FORMAT_TO = DateTimeFormatter.ofPattern("yyyy.MM.dd'D'HH:mm:ss.SSSSSSSSS");
+    private static final DateFormat dateFormat = new SimpleDateFormat("yyyy.MM.dd'D'HH:mm:ss.SSS");
+    private static final NumberFormat nanosFormatter = new DecimalFormat("000000");
+    private static final String LIST_DELIMITER = ",";
+    private static final char[] EMPTY_CHAR_ARRAY = new char[0];
+    private static final TimeZone TIME_ZONE = TimeZone.getDefault();
+    private static final long DAY_MILLIS = 86400000L;
+    private static final long QEPOCH_MILLIS = 10957 * DAY_MILLIS;
+    
+    private final static List<PropertyDescriptor> propertyDescriptors;
+    private final static Set<Relationship> relationships;
+
+    static {
+        List<PropertyDescriptor> _propertyDescriptors = new ArrayList<>();
+        _propertyDescriptors.addAll(descriptors);
+        _propertyDescriptors.add(TABLE_NAME);
+        _propertyDescriptors.add(INSERTER);
+	_propertyDescriptors.add(SET_TIME_ONTICK);
+        propertyDescriptors = Collections.unmodifiableList(_propertyDescriptors);
+        Set<Relationship> _relationships = new HashSet<>();
+        _relationships.add(REL_SUCCESS);
+        _relationships.add(REL_FAILURE);
+        _relationships.add(REL_RETRY);
+        relationships = Collections.unmodifiableSet(_relationships);
+    }
+
+
+    private final LinkedHashMap<String,String> metaMAP = new LinkedHashMap<>();
+    
+    @Override
+    public Set<Relationship> getRelationships() {
+        return relationships;
+    }
+
+    @Override
+    public final List<PropertyDescriptor> getSupportedPropertyDescriptors() {
+        return propertyDescriptors;
+    }
+
+    
+
+    @OnScheduled
+    public void onScheduled(final ProcessContext context) {
+	getLogger().info("Initialize the connection pool");
+	init(context);
+	//TODO 
+    }
+    
+    
+    
+    
+    @Override
+    public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {        
+        
+        FlowFile flowFile = session.get();
+        if ( flowFile == null ) {
+            return;
+        } 
+        final ComponentLog logger = getLogger();
+        
+        init(context);
+        QBasicConnection qConnection = getConnection();       
+        if(metaInfo == null){
+            getLogger().info("try get the meta info");
+            metaInfo = queryForMeta(context);
+            QTable table = metaInfo.getKeys();            
+            for (Row row : table) {
+                String tar = (String)(row.toArray())[0];
+                metaMAP.put(tar, (flowFile.getAttribute(tar+"_type")));              
+            }
+            //TODO this should be removed.
+	    if(context.getProperty(SET_TIME_ONTICK).getValue().equals("true")){
+	    	metaMAP.remove("time");
+            }
+        }
+        
+
+        Object[] inputObject = new Object[metaMAP.size()]; 
+
+        try {
+            int index = 0;
+            for(Entry<String, String> entry : metaMAP.entrySet()){
+		    getLogger().info("Converting the " + entry.getKey());
+		    getLogger().info("Convert type is " + entry.getValue());
+	            getLogger().info("Convert content is " + flowFile.getAttribute(entry.getValue()));
+ 	            inputObject[index] = convert(flowFile.getAttribute(entry.getKey()),entry.getValue());
+                    index ++;             
+             }
+        } catch (QException e1) {
+            e1.printStackTrace();
+            logger.error("Could not convert the data to Qtypes");
+            session.transfer(flowFile, REL_FAILURE);
+            return;
+        }catch (Exception e2) {
+            e2.printStackTrace();
+            logger.error("Could not convert the data due to the exception e" + e2);
+            session.transfer(flowFile, REL_FAILURE);
+            return;
+        }
+
+        try {
+            qConnection.sync(context.getProperty(INSERTER).getValue(), context.getProperty(TABLE_NAME).getValue(),inputObject);      
+            session.getProvenanceReporter().send(flowFile, context.getProperty(PORT).getValue());
+            session.transfer(flowFile, REL_SUCCESS); 
+        } catch (QException e) {
+            logger.error("QException occured, need to check the transferred data " , e);
+            session.transfer(flowFile, REL_FAILURE);
+        }catch (IOException e) {
+            //TODO should not retry everytime at high frequency
+            logger.error("IOException, reset connection " , e);
+            session.transfer(flowFile, REL_RETRY);
+            try {
+                qConnection.reset();
+            } catch (IOException | QException e1) {
+                logger.error("Error in checking the session or reset session " , e);
+            }
+        }
+        try {
+            connectionPool.put(qConnection);
+        } catch (InterruptedException e) {
+            logger.error("Error in putting back the connection to queue " , e);
+            e.printStackTrace();
+        }
+        
+    }
+    
+    @OnUnscheduled
+    public void stop() {
+        super.stop();
+    }
+    
+    @OnShutdown
+    public void shutdown() {
+        super.stop();
+    }
+
+    public Object convert(String source, String targetType) throws QException, ParseException{        
+        switch(targetType){
+            case "symbol" : 
+                return kdbValue(source);
+            case "string":
+                return kdbValueCharList(source);
+            case "jsontime":
+                return parseJSONDateTimeUTC(source,DATETIME_FORMATTER_JSON);
+            case "kdbtime":
+                return parseJSONDateTimeUTC(source,DATETIME_FORMAT_KDB);
+            case "alpacatime":
+                return parseJSONDateTimeUTC(source,DATETIME_FORMAT_ALPACA);
+            case "timestamp":
+                return kdbValueTimestamp(source,TIMESTAMP_FORMAT_FROM,TIMESTAMP_FORMAT_TO);
+            case "float":
+                return kdbFloatValue(Double.parseDouble(source));
+            case "int":
+                return kdbIntValue(Integer.parseInt(source));
+            case "long":
+                return kdbLongValue(Long.parseLong(source));
+            case "floatlist":
+                return kdbFloatList(source);
+            case "symlist":
+                return kdbSymList(source);
+            case "qtime":
+                return qtimeFromString(source);
+	    case "timestamplist":
+                return kdbTimestampList(source,TIMESTAMP_FORMAT_FROM,TIMESTAMP_FORMAT_TO);
+            case "longlist":
+                return kdbLongList(source);
+            case "guid":
+                return kdbUUIDValue(UUID.fromString(source));
+            case "guidlist":
+                return kdbUUIDList(source);
+	    case "boolean":
+		return kdbBooleanValue(Boolean.parseBoolean(source));
+        };
+        return null;
+       
+        
+    }
+    
+    protected QKeyedTable queryForMeta(ProcessContext context) {
+        QBasicConnection connection = null;
+        //QKeyedTable metaResponse;
+        connection = openConnectionTemp(context);
+        String tabName = context.getProperty(TABLE_NAME).getValue();       
+        try {
+            Object response = connection.sync("meta", tabName);
+            return (QKeyedTable) response;
+        } catch (QException | IOException e) {
+            getLogger().error("Error in query meta table", e);
+            return null;
+        } finally {
+            closeConnection(connection);
+        }
+    }
+    
+    public  Double[] kdbFloatList(String stringValue) throws QException {
+	if (stringValue == null) {
+                return  (Double[]) QType.getQNull(QType.DOUBLE_LIST);
+        }else{
+	    //TODO If the Json has [], need to do the following remove.
+            stringValue = stringValue.replace("[","");
+            stringValue = stringValue.replace("]","");
+            String[] source = stringValue.split(LIST_DELIMITER);
+            Double[] output = new Double[source.length];
+            for(int i = 0; i < source.length; i++){
+                output[i] = Double.parseDouble(source[i]);
+            }
+            return output;
+        }
+
+    }
+    
+    public  Long[] kdbLongList(String stringValue) throws QException {
+	if (stringValue == null) {
+                return  (Long[]) QType.getQNull(QType.DOUBLE_LIST);
+        }else{
+            //TODO If the Json has [], need to do the following remove.
+	    stringValue = stringValue.replace("[","");
+            stringValue = stringValue.replace("]","");
+            String[] source = stringValue.split(LIST_DELIMITER);
+            Long[] output = new Long[source.length];
+            for(int i = 0; i < source.length; i++){
+                output[i] = Long.parseLong(source[i]);
+            }
+            return output;
+        }
+
+    }    
+
+    public  UUID[] kdbUUIDList(String stringValue) throws QException {
+        if (stringValue == null) {
+                return  (UUID[]) QType.getQNull(QType.GUID_LIST);
+        }else{
+            String[] source = stringValue.split(LIST_DELIMITER);
+            UUID[] output = new UUID[source.length];
+            for(int i = 0; i < source.length; i++){
+                output[i] = UUID.fromString(source[i]);                
+            }
+            return output;
+        }
+
+    }
+
+    /**
+     * Convert from Java:LocalDateTime to kdb:timestamp.
+     * @param timestamp,fommatterFrom,fommaterTo
+     * @return
+     * @throws ParseException QException
+     */
+    public QTimestamp[] kdbTimestampList(String tpList,DateTimeFormatter fommatterFrom,DateTimeFormatter fommaterTo) throws QException, ParseException{
+	if (tpList == null) {
+                return (QTimestamp[]) QType.getQNull(QType.TIMESTAMP);
+        }
+        //TODO If the Json has [], need to do the following remove.
+        tpList = tpList.replace("[","");
+        tpList = tpList.replace("]","");
+        tpList = tpList.replace("\"","");
+	String[] source = tpList.split(LIST_DELIMITER);
+        //getLogger().info("After split timestamp is" + source.toString());
+        QTimestamp[] output = new QTimestamp[source.length];
+        for(int i = 0; i < source.length; i++){
+            output[i] = kdbValueTimestamp(source[i],fommatterFrom,fommaterTo);
+        }
+
+        return output;
+    }
+
+
+    public String[] kdbSymList(String stringValue) throws QException {
+	if (stringValue == null) {
+                return (String[]) QType.getQNull(QType.SYMBOL);
+        }
+	//TODO If the Json has [], need to do the following remove.
+        stringValue = stringValue.replace("[","");
+        stringValue = stringValue.replace("]","");
+	stringValue = stringValue.replace("\"","");
+        //getLogger().info("Input symlist is " + stringValue);
+        String[] output = stringValue.split(LIST_DELIMITER);
+        //getLogger().info("After-split symlist is " + output);
+        return output;
+    }
+    
+    public  String kdbValue(String stringValue) throws QException {
+	if (stringValue == null) {
+                return (String) QType.getQNull(QType.SYMBOL);
+        }
+        return stringValue;
+    }
+    public  char[] kdbValueCharList(String stringValue) {
+	if (stringValue == null) {
+            return EMPTY_CHAR_ARRAY;
+        }
+        return stringValue.toCharArray();
+    }
+    
+    public static UUID kdbUUIDValue(UUID uuidValue) throws QException {
+        if (uuidValue == null) {
+                return (UUID) QType.getQNull(QType.GUID);
+        }
+        return uuidValue;
+    }    
+    
+    /**
+     * Convert from Java:LocalDateTime to kdb:timestamp.
+     * @param dateTime
+     * @return
+     * @throws ParseException QException
+     */
+    public QTimestamp kdbValueTimestamp(String timestamp,DateTimeFormatter fommatterFrom,DateTimeFormatter fommaterTo) throws QException, ParseException{
+        if (timestamp == null) {
+                return (QTimestamp) QType.getQNull(QType.TIMESTAMP);
+        }
+        //getLogger().info("Original timestamp is" + timestamp);
+        LocalDateTime timeJ = LocalDateTime.parse(timestamp, fommatterFrom);
+        //getLogger().info("Timestamp before converted " + timeJ);
+        String targetTime = timeJ.format(fommaterTo);
+        //getLogger().info("Timestamp is converted to" + timeJ.format(fommaterTo));
+        return new QTimestamp(getNanos(getDateformat().parse(targetTime.substring(0, targetTime.lastIndexOf(".") + 4)))
+                + getNanosformat().parse(targetTime.substring(targetTime.lastIndexOf(".") + 4)).longValue());
+    }
+    
+    public static QDateTime parseJSONDateTimeUTC(String time,DateTimeFormatter fommatter) throws QException {
+        LocalDateTime timeJ = LocalDateTime.parse(time, fommatter);
+        
+        if (timeJ == null) {
+                return (QDateTime) QType.getQNull(QType.DATETIME);
+        }
+        return new QDateTime(toDate(timeJ));
+        
+    }
+    public static Date toDate(LocalDateTime dateTime) {
+        if (dateTime == null) {
+            return null;
+        }
+        ZonedDateTime zonedDateTime = dateTime.atZone(TIME_ZONE.toZoneId());
+        return Date.from(zonedDateTime.toInstant());
+    }
+    
+    public Double kdbFloatValue(Double floatValue) throws QException{
+        if (floatValue == null) {
+                return (Double) QType.getQNull(QType.DOUBLE);
+        }
+        return floatValue;
+    }
+
+    public static Boolean kdbBooleanValue(Boolean booleanValue) throws QException {
+        if (booleanValue == null) {
+                return (Boolean) QType.getQNull(QType.BOOL);
+        }
+        return booleanValue;
+    }
+
+    
+    public static Integer kdbIntValue(Integer integerValue) throws QException {
+        if (integerValue == null) {
+                return (Integer) QType.getQNull(QType.INT);
+        }
+        return integerValue;
+    }
+
+    /**
+     * Returns a {@link QTime} represented by a given string.
+     * 
+     * @param date
+     *            as {@link String}
+     * @return a {@link QTime} instance representing date.
+     * @throws IllegalArgumentException
+     *             when date cannot be parsed
+     */
+    public QTime qtimeFromString( final String date ) {
+        if ( date == null || date.length() == 0 || date.equals("0Nt") ) {
+            return new QTime(Integer.MIN_VALUE);
+        }
+
+        try {
+            final String[] parts = date.split(":|\\.");
+            final int hours = Integer.parseInt(parts[0]);
+            final int minutes = Integer.parseInt(parts[1]);
+            final int seconds = Integer.parseInt(parts[2]);
+            final int millis = Integer.parseInt(parts[3]);
+            return new QTime((millis + 1000 * seconds + 60000 * minutes + 3600000 * Math.abs(hours)) * ('-' == date.charAt(0) ? -1 : 1));
+        } catch ( final Exception e ) {
+            throw new IllegalArgumentException("Cannot parse QTime from: " + date, e);
+        }
+    }
+
+
+    
+    /**
+     * Convert from Java:Long list to kdb:long.<br>
+     * @param longValue
+     * @return
+     * @throws QException 
+     */
+    public  Long kdbLongValue(Long longValue) throws QException {
+	if (longValue == null) {
+                return (Long) QType.getQNull(QType.LONG);
+        }
+        return longValue;
+    }
+    private static long getNanos( final Date datetime ) {
+        return 1000000 * (tzOffsetFromQ(datetime.getTime()) - QEPOCH_MILLIS);
+    }
+
+    static long tzOffsetFromQ( final long dt ) {
+        return dt + TIME_ZONE.getOffset(dt);
+    }
+    
+    private static DateFormat getDateformat() {
+        return (DateFormat) dateFormat.clone();
+    }
+    private static NumberFormat getNanosformat() {
+        return (NumberFormat) nanosFormatter.clone();
+    }
+    
+    
+}
+
+
