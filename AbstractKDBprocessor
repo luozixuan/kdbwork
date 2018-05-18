@@ -250,7 +250,21 @@ public abstract class AbstractKDBProcessor extends AbstractProcessor {
         
     }
     
-    
+    protected QCallbackConnection openCallBackConnection(ProcessContext context ) {
+        QCallbackConnection connection = null;   
+        final String host = context.getProperty(HOST).getValue();
+        final int port = Integer.parseInt(context.getProperty(PORT).getValue());
+        final String username = context.getProperty(USER_NAME).getValue();
+        final String password = context.getProperty(PASSWORD).getValue();
+        try {
+            connection = new QCallbackConnection(host, port, username, password);
+            connection.open();
+        } catch (QException | IOException e) {
+            //getLogger().error("Failed to schedule {} due to {}", new Object[] { this.getClass().getName(), e }, e);
+            getLogger().error("Cannnot create callback connection. host=" + host + ", port=" + port + ", username="+ username + ", password=" + password, e);
+        }
+        return connection;       
+    }
 
     
     public void stop() {
@@ -260,7 +274,11 @@ public abstract class AbstractKDBProcessor extends AbstractProcessor {
                 closeConnection(qcon);
             }
         }
-
+        if(!(callbackCon == null)){
+            callbackCon.stopListener();
+            closeConnection(callbackCon);
+            callbackCon = null;
+        }       
     }
     
 
