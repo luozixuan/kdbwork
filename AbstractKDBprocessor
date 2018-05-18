@@ -1,5 +1,3 @@
-package Yan.processors.kdbversion;
-
 /*
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -16,7 +14,7 @@ package Yan.processors.kdbversion;
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
+package btmu.efx.processors.kdb;
 
 
 import java.io.IOException;
@@ -31,10 +29,10 @@ import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.util.StandardValidators;
 
 import com.exxeleron.qjava.QBasicConnection;
+import com.exxeleron.qjava.QCallbackConnection;
 import com.exxeleron.qjava.QConnection;
 import com.exxeleron.qjava.QException;
 import com.exxeleron.qjava.QKeyedTable;
-//import ny2.ats.database.kdb.KdbConnectionUtility;
 import org.apache.nifi.components.PropertyDescriptor;
 
 public abstract class AbstractKDBProcessor extends AbstractProcessor {
@@ -56,13 +54,15 @@ public abstract class AbstractKDBProcessor extends AbstractProcessor {
     public static final PropertyDescriptor USER_NAME = new PropertyDescriptor.Builder()
         .name("KDB user Name")
         .description("The user name used to access")
-        .required(false)
+        .required(true)
+	.addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
         .build();
     public static final PropertyDescriptor PASSWORD = new PropertyDescriptor.Builder()
         .name("KDB process password")
         .description("The password used to access")
-        .required(false)
-        .build();
+	.required(true)
+        .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+	.build();
     
 
     
@@ -86,7 +86,7 @@ public abstract class AbstractKDBProcessor extends AbstractProcessor {
     // Q connection
     private static final int CONNECTION_POOL_SIZE = 5;
     protected BlockingQueue<QBasicConnection> connectionPool = new LinkedBlockingQueue<>(CONNECTION_POOL_SIZE);
-    
+    protected QCallbackConnection callbackCon;
     static {
         descriptors.add(HOST);
         descriptors.add(PORT);
@@ -254,14 +254,6 @@ public abstract class AbstractKDBProcessor extends AbstractProcessor {
 
     
     public void stop() {
-/*        if (kdbSession.get() != null) {
-            try {
-                kdbSession.get().close();
-            } catch (IOException e) {
-                getLogger().error("Error in closing connection.", e);
-            }
-            kdbSession.set(null);
-        }*/
         if(!connectionPool.isEmpty()){
             for(QBasicConnection qcon : connectionPool){
                 getLogger().info("Closing the Qconnections gracefully.");
