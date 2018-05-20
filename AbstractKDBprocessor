@@ -236,6 +236,19 @@ public abstract class AbstractKDBProcessor extends AbstractProcessor {
         
     }
     
+    protected static QBasicConnection openConnectionForTest (ProcessContext context) throws QException,IOException {
+        final String host = context.getProperty(HOST).getValue();
+        final int port = Integer.parseInt(context.getProperty(PORT).getValue());
+        final String username = context.getProperty(USER_NAME).getValue();
+        final String password = context.getProperty(PASSWORD).getValue();
+        QBasicConnection connection = null;    
+
+        connection = new QBasicConnection(host, port, username, password);
+        connection.open();
+        return connection;
+        
+    }
+    
     protected void openConnection(String host, int port, String username, String password) {
         QBasicConnection connection = null;
         try {
