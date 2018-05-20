@@ -16,6 +16,7 @@
  */
 package btmu.efx.processors.kdb;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.Charset;
@@ -46,7 +47,9 @@ import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.processor.exception.ProcessException;
 import org.apache.nifi.processor.io.OutputStreamCallback;
 import org.apache.nifi.processor.util.StandardValidators;
-import java.util.Arrays;
+
+import com.exxeleron.qjava.QBasicConnection;
+import com.exxeleron.qjava.QCallbackConnection;
 import com.exxeleron.qjava.QDateTime;
 import com.exxeleron.qjava.QErrorMessage;
 import com.exxeleron.qjava.QException;
@@ -145,11 +148,12 @@ public class SubKDBProcessor  extends AbstractKDBProcessor {
         }*/
 
         final ComponentLog logger = getLogger();
-
-        if(callbackCon ==null){
+        if(!isRemoteFeederNotAlive(callbackCon,logger,context)){
             try{
+                logger.info("-------DEBUG000");
                 final Charset charset = Charset.forName(context.getProperty(CHARSET).getValue());
                 callbackCon = openCallBackConnection(context);
+                logger.info("-------DEBUG001");
                 String tabName = context.getProperty(TABLE_NAME).getValue();
                 final AtomicLong nrOfRows = new AtomicLong(0L);
                 final QMessagesListener listener = new QMessagesListener() {
@@ -215,6 +219,9 @@ public class SubKDBProcessor  extends AbstractKDBProcessor {
             } catch (IOException e) {
                 logger.error("IOException when subscribing" , e);
                 // TODO Auto-generated catch block
+                e.printStackTrace();
+            }catch(Exception e){
+                logger.error("Some Exception happened" , e);
                 e.printStackTrace();
             }
         }
@@ -309,12 +316,39 @@ public class SubKDBProcessor  extends AbstractKDBProcessor {
                 nrOfRows += 1;               
                 outStream.write("}".getBytes(charset));
             }
+        }catch(EOFException e){
+            logger.error("In JSON converting Exception happened" , e);
+            e.printStackTrace();
         }finally{
 
             outStream.write("]}".getBytes());
         }
         return nrOfRows;
     }
+    
+    public static boolean isRemoteFeederNotAlive(QCallbackConnection con , ComponentLog logger,ProcessContext context){       
+        if(con == null){
+            return false;
+        }else{
+            try {
+                QBasicConnection q = openConnectionForTest(context);
+                logger.info("---Debug010");
+                q.close();
+                return true;
+            } catch (QException | IOException e) {
+                logger.info("---CalcBack Connection is down, will restart the connection");
+                try {
+                    Thread.sleep(30000);
+                } catch (InterruptedException e1) {
+                    // TODO Auto-generated catch block
+                    e1.printStackTrace();
+                }
+                // TODO Auto-generated catch block
+                return false;
+            } 
+        }
+    }
+    
     
     public static String convertList(Object[] arr){
         String res = null;
